@@ -23,20 +23,23 @@ const Program = struct {
         return program;
     }
 
-    fn callback_earsed(comptime callback: *const fn (*Program, i32) void) *const fn (*anyopaque, i32) void {
-        return &struct {
-            fn call(context: *anyopaque, result: i32) void {
-                const program: *Program = @ptrCast(@alignCast(context));
-                callback(program, result);
-            }
-        }.call;
+    fn program_completion(self: *Program, comptime callback: *const fn (*Program, i32) void) zig_ev.EvLoop.Completion {
+        return .{
+            .context = self,
+            .callback = &struct {
+                fn call(context: *anyopaque, result: i32) void {
+                    const program: *Program = @ptrCast(@alignCast(context));
+                    callback(program, result);
+                }
+            }.call,
+        };
     }
 
     fn open_callback(self: *Program, res: i32) void {
         std.debug.print("From open callback {}\n", .{res});
         self.file_fd = res;
 
-        self.completion = zig_ev.EvLoop.Completion{ .context = self, .callback = callback_earsed(write_callback) };
+        self.completion = self.program_completion(write_callback);
 
         self.ev_loop.write(&self.completion, self.file_fd, "Hello\n", 0) catch unreachable;
         std.debug.print("queued write callback\n", .{});
@@ -45,7 +48,7 @@ const Program = struct {
     fn write_callback(self: *Program, res: i32) void {
         std.debug.print("From write callback: {}\n", .{res});
 
-        self.completion = zig_ev.EvLoop.Completion{ .context = self, .callback = callback_earsed(read_callback) };
+        self.completion = self.program_completion(read_callback);
 
         self.ev_loop.read(&self.completion, self.file_fd, &self.read_buffer, 0) catch unreachable;
     }
@@ -59,7 +62,7 @@ const Program = struct {
     }
 
     fn run(self: *Program) !void {
-        self.completion = zig_ev.EvLoop.Completion{ .context = self, .callback = callback_earsed(open_callback) };
+        self.completion = self.program_completion(open_callback);
 
         try self.ev_loop.open(&self.completion, std.os.linux.AT.FDCWD, "test.txt", .{
             .ACCMODE = .RDWR,

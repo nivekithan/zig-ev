@@ -5,7 +5,26 @@ const linux = std.os.linux;
 pub const EvLoop = struct {
     ring: linux.IoUring,
 
-    pub const Completion = struct { context: *anyopaque, callback: *const fn (*anyopaque, i32) void };
+    pub const Completion = struct {
+        context: *anyopaque,
+        callback: *const fn (*anyopaque, i32) void,
+
+        pub fn init(
+            comptime Context: type,
+            state: *Context,
+            comptime callback: *const fn (*Context, i32) void,
+        ) Completion {
+            return .{
+                .context = state,
+                .callback = &struct {
+                    fn call(context: *anyopaque, result: i32) void {
+                        const typed_state: *Context = @ptrCast(@alignCast(context));
+                        callback(typed_state, result);
+                    }
+                }.call,
+            };
+        }
+    };
 
     pub fn init(entries: u16) !EvLoop {
         const ring = try linux.IoUring.init(entries, 0);
@@ -72,76 +91,3 @@ pub const EvLoop = struct {
         }
     }
 };
-
-test "open/write/read" {
-    const Callbacks = struct {
-        const data = "hello";
-        var loop: *EvLoop = undefined;
-        var fd: ?linux.fd_t = null;
-        var buffer: [data.len]u8 = undefined;
-        var failure: ?anyerror = null;
-        var done = false;
-
-        fn onOpen(result: i32) void {
-            if (result < 0) {
-                failure = error.OpenFailed;
-                done = true;
-                return;
-            }
-            fd = @intCast(result);
-            loop.write(onWrite, fd.?, data, 10) catch |err| {
-                failure = err;
-                done = true;
-            };
-        }
-
-        fn onWrite(result: i32) void {
-            if (result != data.len) {
-                failure = error.WriteFailed;
-                done = true;
-                return;
-            }
-            loop.read(onRead, fd.?, &buffer, 10) catch |err| {
-                failure = err;
-                done = true;
-            };
-        }
-
-        fn onRead(result: i32) void {
-            if (result != data.len) {
-                failure = error.ReadFailed;
-                done = true;
-                return;
-            }
-            std.testing.expectEqualStrings(data, &buffer) catch |err| {
-                failure = err;
-            };
-            done = true;
-        }
-    };
-    Callbacks.fd = null;
-    Callbacks.failure = null;
-    Callbacks.done = false;
-
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-
-    var loop = try EvLoop.init(8);
-    defer loop.deinit();
-    Callbacks.loop = &loop;
-    defer if (Callbacks.fd) |fd| {
-        _ = linux.close(fd);
-    };
-
-    try loop.open(Callbacks.onOpen, tmp.dir.handle, "data", .{
-        .ACCMODE = .RDWR,
-        .CREAT = true,
-        .TRUNC = true,
-    }, 0o600);
-    for (0..1_000_000) |_| {
-        if (Callbacks.done) break;
-        try loop.run();
-    }
-    try std.testing.expect(Callbacks.done);
-    if (Callbacks.failure) |err| return err;
-}

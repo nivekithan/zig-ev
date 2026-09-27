@@ -23,23 +23,11 @@ const Program = struct {
         return program;
     }
 
-    fn program_completion(self: *Program, comptime callback: *const fn (*Program, i32) void) zig_ev.EvLoop.Completion {
-        return .{
-            .context = self,
-            .callback = &struct {
-                fn call(context: *anyopaque, result: i32) void {
-                    const program: *Program = @ptrCast(@alignCast(context));
-                    callback(program, result);
-                }
-            }.call,
-        };
-    }
-
     fn open_callback(self: *Program, res: i32) void {
         std.debug.print("From open callback {}\n", .{res});
         self.file_fd = res;
 
-        self.completion = self.program_completion(write_callback);
+        self.completion = generic_completion(Program, self, write_callback);
 
         self.ev_loop.write(&self.completion, self.file_fd, "Hello\n", 0) catch unreachable;
         std.debug.print("queued write callback\n", .{});
@@ -48,7 +36,7 @@ const Program = struct {
     fn write_callback(self: *Program, res: i32) void {
         std.debug.print("From write callback: {}\n", .{res});
 
-        self.completion = self.program_completion(read_callback);
+        self.completion = generic_completion(Program, self, read_callback);
 
         self.ev_loop.read(&self.completion, self.file_fd, &self.read_buffer, 0) catch unreachable;
     }
@@ -62,7 +50,7 @@ const Program = struct {
     }
 
     fn run(self: *Program) !void {
-        self.completion = self.program_completion(open_callback);
+        self.completion = generic_completion(Program, self, open_callback);
 
         try self.ev_loop.open(&self.completion, std.os.linux.AT.FDCWD, "test.txt", .{
             .ACCMODE = .RDWR,
@@ -73,3 +61,15 @@ const Program = struct {
         while (!self.is_done) try self.ev_loop.run();
     }
 };
+
+fn generic_completion(comptime Context: type, state: *Context, comptime callback: *const fn (*Context, i32) void) zig_ev.EvLoop.Completion {
+    return .{
+        .context = state,
+        .callback = &struct {
+            fn call(context: *anyopaque, result: i32) void {
+                const program: *Context = @ptrCast(@alignCast(context));
+                callback(program, result);
+            }
+        }.call,
+    };
+}

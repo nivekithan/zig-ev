@@ -10,6 +10,31 @@ pub const EvLoop = struct {
         callback: *const fn (*anyopaque, i32) void,
         /// The loop associated with this completion.
         ev_loop: *EvLoop,
+        /// Inputs to the last queued operation. Paths and buffers are borrowed.
+        operation: Operation = .none,
+
+        pub const Operation = union(enum) {
+            none,
+            open: struct {
+                dir_fd: linux.fd_t,
+                path: [*:0]const u8,
+                flags: linux.O,
+                mode: std.posix.mode_t,
+            },
+            read: struct {
+                fd: linux.fd_t,
+                buffer: []u8,
+                offset: u64,
+            },
+            write: struct {
+                fd: linux.fd_t,
+                buffer: []const u8,
+                offset: u64,
+            },
+            close: struct {
+                fd: linux.fd_t,
+            },
+        };
     };
 
     pub fn completion(
@@ -53,6 +78,7 @@ pub const EvLoop = struct {
     ) !void {
         _ = try self.ring.openat(@intCast(@intFromPtr(c)), dir_fd, path, flags, mode);
         c.ev_loop = self;
+        c.operation = .{ .open = .{ .dir_fd = dir_fd, .path = path, .flags = flags, .mode = mode } };
     }
 
     /// Queues a positional read. The buffer must remain valid until completion.
@@ -66,6 +92,7 @@ pub const EvLoop = struct {
     ) !void {
         _ = try self.ring.read(@intCast(@intFromPtr(c)), fd, .{ .buffer = buffer }, offset);
         c.ev_loop = self;
+        c.operation = .{ .read = .{ .fd = fd, .buffer = buffer, .offset = offset } };
     }
 
     /// Queues a positional write. The buffer must remain valid until completion.
@@ -79,6 +106,7 @@ pub const EvLoop = struct {
     ) !void {
         _ = try self.ring.write(@intCast(@intFromPtr(c)), fd, buffer, offset);
         c.ev_loop = self;
+        c.operation = .{ .write = .{ .fd = fd, .buffer = buffer, .offset = offset } };
     }
 
     /// Queues a close request. The completion must remain valid until completion.
@@ -86,6 +114,7 @@ pub const EvLoop = struct {
     pub fn close(self: *EvLoop, c: *Completion, fd: linux.fd_t) !void {
         _ = try self.ring.close(@intCast(@intFromPtr(c)), fd);
         c.ev_loop = self;
+        c.operation = .{ .close = .{ .fd = fd } };
     }
 
     /// Submits queued operations and calls back for every available completion.

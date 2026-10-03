@@ -9,7 +9,7 @@ const DoneTracker = struct {
         return .{ .is_done = false };
     }
     fn markItDone(self: *DoneTracker, result: i32) void {
-        _ = result;
+        std.debug.print("[markItDoneCallback] result: {}", .{result});
         self.*.is_done = true;
     }
 };
@@ -61,8 +61,20 @@ const KvProgram = struct {
     }
 
     fn open_callback(request: *PutRequest, res: i32) void {
-        std.debug.print("open callback called key: {s}, value: {s}, res: {}\n", .{ request.key, request.value, res });
-        if (res >= 0) _ = std.os.linux.close(res);
-        request.on_done.callback(request.on_done.context, res);
+        std.debug.print("[open callback] key: {s}, value: {s}, res: {}\n", .{ request.key, request.value, res });
+
+        const ev_loop = request._completion.ev_loop;
+
+        request._completion = ev_loop.completion(PutRequest, request, write_callback);
+
+        ev_loop.write(&request._completion, res, request.value, 0) catch {
+            @panic("failed to create write callback");
+        };
+    }
+
+    fn write_callback(request: *PutRequest, res: i32) void {
+        std.debug.print("[write callback] key: {s}, value: {s}, res: {}\n", .{ request.key, request.value, res });
+
+        request.on_done.callback(request.on_done.context, 1);
     }
 };

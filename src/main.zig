@@ -19,10 +19,10 @@ const DoneTracker = struct {
 pub fn main() !void {
     var ev_loop = try zig_ev.EvLoop.init(32);
     defer ev_loop.deinit();
-    var program = KvProgram.init(&ev_loop);
+    var program = KvEngine.init(&ev_loop);
     var done_tracker = DoneTracker.init();
 
-    var put_request = KvProgram.PutRequest.init(
+    var put_request = KvEngine.PutRequest.init(
         "test.txt",
         "world",
         ev_loop.completion(DoneTracker, &done_tracker, DoneTracker.mark_it_done),
@@ -34,7 +34,7 @@ pub fn main() !void {
 
     done_tracker.is_done = false;
     var buffer: [64]u8 = undefined;
-    var get_request = KvProgram.GetRequest.init(
+    var get_request = KvEngine.GetRequest.init(
         "test.txt",
         &buffer,
         ev_loop.completion(DoneTracker, &done_tracker, DoneTracker.mark_it_done),
@@ -46,10 +46,10 @@ pub fn main() !void {
     std.debug.print("\n[get result] {s}\n", .{get_request.buffer[0..get_request.bytes_read]});
 }
 
-const KvProgram = struct {
+const KvEngine = struct {
     ev_loop: *zig_ev.EvLoop,
 
-    fn init(ev_loop: *zig_ev.EvLoop) KvProgram {
+    fn init(ev_loop: *zig_ev.EvLoop) KvEngine {
         return .{ .ev_loop = ev_loop };
     }
 
@@ -82,7 +82,7 @@ const KvProgram = struct {
 
     /// Reads once into the caller's buffer. Request and buffer must stay alive
     /// until on_done, which receives the byte count. Assumes all I/O succeeds.
-    fn get_key(self: *KvProgram, request: *GetRequest) !void {
+    fn get_key(self: *KvEngine, request: *GetRequest) !void {
         request.bytes_read = 0;
         request._completion = self.ev_loop.completion(GetRequest, request, get_open_callback);
         try self.ev_loop.open(&request._completion, std.os.linux.AT.FDCWD, request.key.ptr, .{ .ACCMODE = .RDONLY }, 0);
@@ -120,7 +120,7 @@ const KvProgram = struct {
     }
 
     fn put_key(
-        self: *KvProgram,
+        self: *KvEngine,
         request: *PutRequest,
     ) !void {
         request._completion = self.ev_loop.completion(PutRequest, request, open_callback);

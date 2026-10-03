@@ -81,6 +81,13 @@ pub const EvLoop = struct {
         c.ev_loop = self;
     }
 
+    /// Queues a close request. The completion must remain valid until completion.
+    /// The callback receives 0 on success or negative Linux errno.
+    pub fn close(self: *EvLoop, c: *Completion, fd: linux.fd_t) !void {
+        _ = try self.ring.close(@intCast(@intFromPtr(c)), fd);
+        c.ev_loop = self;
+    }
+
     /// Submits queued operations and calls back for every available completion.
     /// Returns the number of callbacks invoked; never waits for an unfinished I/O.
     pub fn run(self: *EvLoop) !void {

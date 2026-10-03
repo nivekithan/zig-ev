@@ -77,4 +77,10 @@ const KvProgram = struct {
 
         request.on_done.callback(request.on_done.context, 1);
     }
+
+    fn close_callback(request: *PutRequest, res: i32) void {
+        std.debug.print("[close callback] key: {s}, value: {s}, res: {}\n", .{ request.key, request.value, res });
+
+        request.on_done.callback(request.on_done.context, 1);
+    }
 };

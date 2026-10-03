@@ -23,7 +23,7 @@ pub fn main() !void {
     var put_request = KvProgram.PutRequest.init(
         "test.txt",
         "world",
-        zig_ev.EvLoop.Completion.init(DoneTracker, &done_tracker, DoneTracker.markItDone),
+        ev_loop.completion(DoneTracker, &done_tracker, DoneTracker.markItDone),
     );
 
     try program.put_key(&put_request);
@@ -55,7 +55,7 @@ const KvProgram = struct {
         self: *KvProgram,
         request: *PutRequest,
     ) !void {
-        request._completion = zig_ev.EvLoop.Completion.init(PutRequest, request, open_callback);
+        request._completion = self.ev_loop.completion(PutRequest, request, open_callback);
 
         try self.ev_loop.open(&request._completion, std.os.linux.AT.FDCWD, request.key.ptr, .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true }, 0o600);
     }

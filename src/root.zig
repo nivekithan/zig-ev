@@ -8,23 +8,27 @@ pub const EvLoop = struct {
     pub const Completion = struct {
         context: *anyopaque,
         callback: *const fn (*anyopaque, i32) void,
-
-        pub fn init(
-            comptime Context: type,
-            state: *Context,
-            comptime callback: *const fn (*Context, i32) void,
-        ) Completion {
-            return .{
-                .context = state,
-                .callback = &struct {
-                    fn call(context: *anyopaque, result: i32) void {
-                        const typed_state: *Context = @ptrCast(@alignCast(context));
-                        callback(typed_state, result);
-                    }
-                }.call,
-            };
-        }
+        /// The loop associated with this completion.
+        ev_loop: *EvLoop,
     };
+
+    pub fn completion(
+        self: *EvLoop,
+        comptime Context: type,
+        state: *Context,
+        comptime callback: *const fn (*Context, i32) void,
+    ) Completion {
+        return .{
+            .ev_loop = self,
+            .context = state,
+            .callback = &struct {
+                fn call(context: *anyopaque, result: i32) void {
+                    const typed_state: *Context = @ptrCast(@alignCast(context));
+                    callback(typed_state, result);
+                }
+            }.call,
+        };
+    }
 
     pub fn init(entries: u16) !EvLoop {
         const ring = try linux.IoUring.init(entries, 0);
@@ -41,37 +45,40 @@ pub const EvLoop = struct {
     /// The callback receives the file descriptor or negative Linux errno.
     pub fn open(
         self: *EvLoop,
-        completion: *Completion,
+        c: *Completion,
         dir_fd: linux.fd_t,
         path: [*:0]const u8,
         flags: linux.O,
         mode: std.posix.mode_t,
     ) !void {
-        _ = try self.ring.openat(@intCast(@intFromPtr(completion)), dir_fd, path, flags, mode);
+        _ = try self.ring.openat(@intCast(@intFromPtr(c)), dir_fd, path, flags, mode);
+        c.ev_loop = self;
     }
 
     /// Queues a positional read. The buffer must remain valid until completion.
     /// The callback receives bytes read (0 at EOF) or negative Linux errno.
     pub fn read(
         self: *EvLoop,
-        completion: *Completion,
+        c: *Completion,
         fd: linux.fd_t,
         buffer: []u8,
         offset: u64,
     ) !void {
-        _ = try self.ring.read(@intCast(@intFromPtr(completion)), fd, .{ .buffer = buffer }, offset);
+        _ = try self.ring.read(@intCast(@intFromPtr(c)), fd, .{ .buffer = buffer }, offset);
+        c.ev_loop = self;
     }
 
     /// Queues a positional write. The buffer must remain valid until completion.
     /// The callback receives bytes written (possibly short) or negative Linux errno.
     pub fn write(
         self: *EvLoop,
-        completion: *Completion,
+        c: *Completion,
         fd: linux.fd_t,
         buffer: []const u8,
         offset: u64,
     ) !void {
-        _ = try self.ring.write(@intCast(@intFromPtr(completion)), fd, buffer, offset);
+        _ = try self.ring.write(@intCast(@intFromPtr(c)), fd, buffer, offset);
+        c.ev_loop = self;
     }
 
     /// Submits queued operations and calls back for every available completion.
@@ -85,8 +92,8 @@ pub const EvLoop = struct {
             if (count == 0) break;
 
             for (cqes[0..count]) |cqe| {
-                const completion: *Completion = @ptrFromInt(@as(usize, @intCast(cqe.user_data)));
-                completion.callback(completion.context, cqe.res);
+                const c: *Completion = @ptrFromInt(@as(usize, @intCast(cqe.user_data)));
+                c.callback(c.context, cqe.res);
             }
         }
     }

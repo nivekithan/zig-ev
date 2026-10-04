@@ -62,6 +62,11 @@ pub const EvLoop = struct {
                 buffer: []u8,
                 flags: u32,
             },
+            send: struct {
+                fd: linux.fd_t,
+                buffer: []const u8,
+                flags: u32,
+            },
         };
     };
 
@@ -221,6 +226,21 @@ pub const EvLoop = struct {
         _ = try self.ring.recv(@intCast(@intFromPtr(c)), fd, .{ .buffer = buffer }, flags);
         c.ev_loop = self;
         c.operation = .{ .recv = .{ .fd = fd, .buffer = buffer, .flags = flags } };
+    }
+
+    /// Queues a socket send. Buffer and completion must remain valid until completion.
+    /// The callback receives bytes sent (possibly short) or negative Linux errno.
+    /// Use linux.MSG.NOSIGNAL to suppress SIGPIPE when the peer has closed.
+    pub fn send(
+        self: *EvLoop,
+        c: *Completion,
+        fd: linux.fd_t,
+        buffer: []const u8,
+        flags: u32,
+    ) !void {
+        _ = try self.ring.send(@intCast(@intFromPtr(c)), fd, buffer, flags);
+        c.ev_loop = self;
+        c.operation = .{ .send = .{ .fd = fd, .buffer = buffer, .flags = flags } };
     }
 
     /// Submits queued operations and calls back for every available completion.

@@ -34,6 +34,12 @@ pub const EvLoop = struct {
             close: struct {
                 fd: linux.fd_t,
             },
+            socket: struct {
+                domain: u32,
+                socket_type: u32,
+                protocol: u32,
+                flags: u32,
+            },
         };
     };
 
@@ -115,6 +121,22 @@ pub const EvLoop = struct {
         _ = try self.ring.close(@intCast(@intFromPtr(c)), fd);
         c.ev_loop = self;
         c.operation = .{ .close = .{ .fd = fd } };
+    }
+
+    /// Queues socket creation. The completion must remain valid until completion.
+    /// The callback receives the socket descriptor or negative Linux errno.
+    /// flags are io_uring socket operation flags; use socket_type for SOCK flags.
+    pub fn socket(
+        self: *EvLoop,
+        c: *Completion,
+        domain: u32,
+        socket_type: u32,
+        protocol: u32,
+        flags: u32,
+    ) !void {
+        _ = try self.ring.socket(@intCast(@intFromPtr(c)), domain, socket_type, protocol, flags);
+        c.ev_loop = self;
+        c.operation = .{ .socket = .{ .domain = domain, .socket_type = socket_type, .protocol = protocol, .flags = flags } };
     }
 
     /// Submits queued operations and calls back for every available completion.

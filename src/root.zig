@@ -46,6 +46,11 @@ pub const EvLoop = struct {
                 addrlen: std.posix.socklen_t,
                 flags: u32,
             },
+            listen: struct {
+                fd: linux.fd_t,
+                backlog: usize,
+                flags: u32,
+            },
         };
     };
 
@@ -158,6 +163,20 @@ pub const EvLoop = struct {
         _ = try self.ring.bind(@intCast(@intFromPtr(c)), fd, addr, addrlen, flags);
         c.ev_loop = self;
         c.operation = .{ .bind = .{ .fd = fd, .addr = addr, .addrlen = addrlen, .flags = flags } };
+    }
+
+    /// Queues a listen request. The completion must remain valid until completion.
+    /// The callback receives 0 on success or negative Linux errno. Pass 0 for flags.
+    pub fn listen(
+        self: *EvLoop,
+        c: *Completion,
+        fd: linux.fd_t,
+        backlog: usize,
+        flags: u32,
+    ) !void {
+        _ = try self.ring.listen(@intCast(@intFromPtr(c)), fd, backlog, flags);
+        c.ev_loop = self;
+        c.operation = .{ .listen = .{ .fd = fd, .backlog = backlog, .flags = flags } };
     }
 
     /// Submits queued operations and calls back for every available completion.

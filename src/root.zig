@@ -57,6 +57,11 @@ pub const EvLoop = struct {
                 addrlen: ?*std.posix.socklen_t,
                 flags: u32,
             },
+            recv: struct {
+                fd: linux.fd_t,
+                buffer: []u8,
+                flags: u32,
+            },
         };
     };
 
@@ -201,6 +206,21 @@ pub const EvLoop = struct {
         _ = try self.ring.accept(@intCast(@intFromPtr(c)), fd, addr, addrlen, flags);
         c.ev_loop = self;
         c.operation = .{ .accept = .{ .fd = fd, .addr = addr, .addrlen = addrlen, .flags = flags } };
+    }
+
+    /// Queues a socket receive. Buffer and completion must remain valid until completion.
+    /// The callback receives bytes received, 0 for EOF with a nonempty buffer,
+    /// or negative Linux errno. Pass 0 for ordinary receive flags.
+    pub fn recv(
+        self: *EvLoop,
+        c: *Completion,
+        fd: linux.fd_t,
+        buffer: []u8,
+        flags: u32,
+    ) !void {
+        _ = try self.ring.recv(@intCast(@intFromPtr(c)), fd, .{ .buffer = buffer }, flags);
+        c.ev_loop = self;
+        c.operation = .{ .recv = .{ .fd = fd, .buffer = buffer, .flags = flags } };
     }
 
     /// Submits queued operations and calls back for every available completion.

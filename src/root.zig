@@ -51,6 +51,12 @@ pub const EvLoop = struct {
                 backlog: usize,
                 flags: u32,
             },
+            accept: struct {
+                fd: linux.fd_t,
+                addr: ?*std.posix.sockaddr,
+                addrlen: ?*std.posix.socklen_t,
+                flags: u32,
+            },
         };
     };
 
@@ -177,6 +183,24 @@ pub const EvLoop = struct {
         _ = try self.ring.listen(@intCast(@intFromPtr(c)), fd, backlog, flags);
         c.ev_loop = self;
         c.operation = .{ .listen = .{ .fd = fd, .backlog = backlog, .flags = flags } };
+    }
+
+    /// Queues a single accept request on a listening socket.
+    /// Pass null for addr and addrlen if the peer address is not needed.
+    /// Otherwise, initialize addrlen to the address buffer capacity in bytes.
+    /// The completion and any address storage must remain valid until completion.
+    /// The callback receives the client socket descriptor or negative Linux errno.
+    pub fn accept(
+        self: *EvLoop,
+        c: *Completion,
+        fd: linux.fd_t,
+        addr: ?*std.posix.sockaddr,
+        addrlen: ?*std.posix.socklen_t,
+        flags: u32,
+    ) !void {
+        _ = try self.ring.accept(@intCast(@intFromPtr(c)), fd, addr, addrlen, flags);
+        c.ev_loop = self;
+        c.operation = .{ .accept = .{ .fd = fd, .addr = addr, .addrlen = addrlen, .flags = flags } };
     }
 
     /// Submits queued operations and calls back for every available completion.

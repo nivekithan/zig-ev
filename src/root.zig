@@ -40,6 +40,12 @@ pub const EvLoop = struct {
                 protocol: u32,
                 flags: u32,
             },
+            bind: struct {
+                fd: linux.fd_t,
+                addr: *const std.posix.sockaddr,
+                addrlen: std.posix.socklen_t,
+                flags: u32,
+            },
         };
     };
 
@@ -137,6 +143,21 @@ pub const EvLoop = struct {
         _ = try self.ring.socket(@intCast(@intFromPtr(c)), domain, socket_type, protocol, flags);
         c.ev_loop = self;
         c.operation = .{ .socket = .{ .domain = domain, .socket_type = socket_type, .protocol = protocol, .flags = flags } };
+    }
+
+    /// Queues a bind request. The address and completion must remain valid until completion.
+    /// The callback receives 0 on success or negative Linux errno. Pass 0 for flags.
+    pub fn bind(
+        self: *EvLoop,
+        c: *Completion,
+        fd: linux.fd_t,
+        addr: *const std.posix.sockaddr,
+        addrlen: std.posix.socklen_t,
+        flags: u32,
+    ) !void {
+        _ = try self.ring.bind(@intCast(@intFromPtr(c)), fd, addr, addrlen, flags);
+        c.ev_loop = self;
+        c.operation = .{ .bind = .{ .fd = fd, .addr = addr, .addrlen = addrlen, .flags = flags } };
     }
 
     /// Submits queued operations and calls back for every available completion.

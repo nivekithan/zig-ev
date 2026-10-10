@@ -99,13 +99,21 @@ const TcpServer = struct {
 
         // Hand ownership of the client socket to the connection callback.
         self.on_connection.callback(self.on_connection.context, res);
+        self.completion = self.ev_loop.completion(TcpServer, self, accept_callback);
+        self.ev_loop.accept(&self.completion, self.fd, null, null, std.os.linux.SOCK.CLOEXEC) catch
+            @panic("failed to queue accept");
     }
 };
 
 const EchoServer = struct {
     ev_loop: *zig_ev.EvLoop,
-    completion: zig_ev.EvLoop.Completion = undefined,
-    buffer: [4096]u8 = undefined,
+    connections: [2]Connection = @splat(.{}),
+
+    const Connection = struct {
+        in_use: bool = false,
+        completion: zig_ev.EvLoop.Completion = undefined,
+        buffer: [4096]u8 = undefined,
+    };
 
     fn init(ev_loop: *zig_ev.EvLoop) EchoServer {
         return .{ .ev_loop = ev_loop };
@@ -113,44 +121,63 @@ const EchoServer = struct {
 
     fn on_connection(self: *EchoServer, res: i32) void {
         std.debug.assert(res >= 0);
-        self.completion = self.ev_loop.completion(EchoServer, self, recv_callback);
-        self.ev_loop.recv(&self.completion, res, &self.buffer, 0) catch
-            @panic("failed to queue recv");
+        for (&self.connections) |*connection| {
+            if (connection.in_use) continue;
+            connection.in_use = true;
+            connection.completion = self.ev_loop.completion(Connection, connection, recv_callback);
+            self.ev_loop.recv(&connection.completion, res, &connection.buffer, 0) catch
+                @panic("failed to queue recv");
+            return;
+        }
+
+        // No slot available. This socket has no I/O in flight.
+        _ = std.os.linux.close(res);
     }
 
-    fn recv_callback(self: *EchoServer, res: i32) void {
+    fn recv_callback(self: *Connection, res: i32) void {
         std.debug.assert(self.completion.operation == .recv);
         std.debug.assert(res >= 0);
 
         const input = self.completion.operation.recv;
+        const ev_loop = self.completion.ev_loop;
 
         if (res == 0) {
+            self.completion = ev_loop.completion(Connection, self, close_callback);
+            ev_loop.close(&self.completion, input.fd) catch
+                @panic("failed to queue client close");
             return;
         }
 
-        self.completion = self.ev_loop.completion(EchoServer, self, send_callback);
-        self.ev_loop.send(&self.completion, input.fd, input.buffer[0..@intCast(res)], std.os.linux.MSG.NOSIGNAL) catch
+        self.completion = ev_loop.completion(Connection, self, send_callback);
+        ev_loop.send(&self.completion, input.fd, input.buffer[0..@intCast(res)], std.os.linux.MSG.NOSIGNAL) catch
             @panic("failed to queue send");
     }
 
-    fn send_callback(self: *EchoServer, res: i32) void {
+    fn send_callback(self: *Connection, res: i32) void {
         std.debug.assert(self.completion.operation == .send);
         std.debug.assert(res > 0);
 
         const input = self.completion.operation.send;
+        const ev_loop = self.completion.ev_loop;
         const sent: usize = @intCast(res);
         std.debug.assert(sent <= input.buffer.len);
 
         if (sent < input.buffer.len) {
-            self.completion = self.ev_loop.completion(EchoServer, self, send_callback);
-            self.ev_loop.send(&self.completion, input.fd, input.buffer[sent..], std.os.linux.MSG.NOSIGNAL) catch
+            self.completion = ev_loop.completion(Connection, self, send_callback);
+            ev_loop.send(&self.completion, input.fd, input.buffer[sent..], std.os.linux.MSG.NOSIGNAL) catch
                 @panic("failed to queue send");
             return;
         }
 
-        self.completion = self.ev_loop.completion(EchoServer, self, recv_callback);
-        self.ev_loop.recv(&self.completion, input.fd, &self.buffer, 0) catch
+        self.completion = ev_loop.completion(Connection, self, recv_callback);
+        ev_loop.recv(&self.completion, input.fd, &self.buffer, 0) catch
             @panic("failed to queue recv");
+    }
+
+    fn close_callback(self: *Connection, res: i32) void {
+        std.debug.assert(self.completion.operation == .close);
+        std.debug.assert(res == 0);
+        self.in_use = false;
     }
 };
 

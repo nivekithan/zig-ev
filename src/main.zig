@@ -3,27 +3,15 @@ const Io = std.Io;
 
 const zig_ev = @import("zig_ev");
 
-const DoneTracker = struct {
-    is_done: bool,
-
-    fn init() DoneTracker {
-        return .{ .is_done = false };
-    }
-
-    fn mark_it_done(self: *DoneTracker, result: i32) void {
-        std.debug.print("[markItDoneCallback] result: {}", .{result});
-        self.*.is_done = true;
-    }
-};
-
 pub fn main() !void {
     var ev_loop = try zig_ev.EvLoop.init(32);
     defer ev_loop.deinit();
-    var echo_server = EchoServer.init(&ev_loop, std.heap.page_allocator);
+    var engine = KvEngine.init(&ev_loop);
+    var kv_server = KVServer.init(&ev_loop, &engine, std.heap.page_allocator);
     var server = TcpServer.init(
         &ev_loop,
         9090,
-        ev_loop.completion(EchoServer, &echo_server, EchoServer.on_connection),
+        ev_loop.completion(KVServer, &kv_server, KVServer.on_connection),
     );
 
     try server.start();
@@ -105,107 +93,185 @@ const TcpServer = struct {
     }
 };
 
-const EchoServer = struct {
+const KVServer = struct {
     ev_loop: *zig_ev.EvLoop,
+    engine: *KvEngine,
     allocator: std.mem.Allocator,
 
     const Connection = struct {
-        allocator: std.mem.Allocator,
+        server: *KVServer,
+        fd: std.os.linux.fd_t,
         completion: zig_ev.EvLoop.Completion = undefined,
-        buffer: [4096]u8 = undefined,
+        input: [4096]u8 = undefined,
+        received: usize = 0,
+        key: [255:0]u8 = undefined,
+        value: [4096]u8 = undefined,
+        response: [4128]u8 = undefined,
+        request: union(enum) {
+            none,
+            get: KvEngine.GetRequest,
+            put: KvEngine.PutRequest,
+        } = .none,
     };
 
-    fn init(ev_loop: *zig_ev.EvLoop, allocator: std.mem.Allocator) EchoServer {
-        return .{ .ev_loop = ev_loop, .allocator = allocator };
+    fn init(ev_loop: *zig_ev.EvLoop, engine: *KvEngine, allocator: std.mem.Allocator) KVServer {
+        return .{ .ev_loop = ev_loop, .engine = engine, .allocator = allocator };
     }
 
-    fn on_connection(self: *EchoServer, res: i32) void {
-        std.debug.assert(res >= 0);
+    fn on_connection(self: *KVServer, fd: i32) void {
+        std.debug.assert(fd >= 0);
         const connection = self.allocator.create(Connection) catch
-            @panic("failed to allocate connection");
-        connection.* = .{ .allocator = self.allocator };
+            @panic("failed to allocate KV connection");
+        connection.* = .{ .server = self, .fd = fd };
         connection.completion = self.ev_loop.completion(Connection, connection, recv_callback);
-        self.ev_loop.recv(&connection.completion, res, &connection.buffer, 0) catch
-            @panic("failed to queue recv");
+        self.ev_loop.recv(&connection.completion, fd, &connection.input, 0) catch
+            @panic("failed to queue KV recv");
     }
 
-    fn recv_callback(self: *Connection, res: i32) void {
-        std.debug.assert(self.completion.operation == .recv);
+    fn recv_callback(connection: *Connection, res: i32) void {
+        std.debug.assert(connection.completion.operation == .recv);
         std.debug.assert(res >= 0);
-
-        const input = self.completion.operation.recv;
-        const ev_loop = self.completion.ev_loop;
-
         if (res == 0) {
-            self.completion = ev_loop.completion(Connection, self, close_callback);
-            ev_loop.close(&self.completion, input.fd) catch
-                @panic("failed to queue client close");
+            close_connection(connection);
             return;
         }
 
-        self.completion = ev_loop.completion(Connection, self, send_callback);
-        ev_loop.send(&self.completion, input.fd, input.buffer[0..@intCast(res)], std.os.linux.MSG.NOSIGNAL) catch
-            @panic("failed to queue send");
+        connection.received += @intCast(res);
+        const bytes = connection.input[0..connection.received];
+        if (std.mem.indexOfScalar(u8, bytes, '\n')) |end| {
+            process_request(connection, bytes[0..end]);
+            return;
+        }
+        if (connection.received == connection.input.len) {
+            send_response(connection, "ERROR request too large\n");
+            return;
+        }
+
+        const ev_loop = connection.server.ev_loop;
+        connection.completion = ev_loop.completion(Connection, connection, recv_callback);
+        ev_loop.recv(&connection.completion, connection.fd, connection.input[connection.received..], 0) catch
+            @panic("failed to queue KV recv");
     }
 
-    fn send_callback(self: *Connection, res: i32) void {
-        std.debug.assert(self.completion.operation == .send);
+    const ParsedRequest = struct {
+        operation: enum { get, put },
+        key: []const u8,
+        value: []const u8,
+    };
+
+    const ParseError = error{ InvalidOperation, MissingValue, InvalidKey };
+
+    /// Returned slices borrow the input line; parsing does not allocate or perform I/O.
+    fn parse_request(line: []const u8) ParseError!ParsedRequest {
+        const is_put = std.mem.startsWith(u8, line, "PUT ");
+        const is_get = std.mem.startsWith(u8, line, "GET ");
+        if (!is_put and !is_get) {
+            return error.InvalidOperation;
+        }
+
+        const arguments = line[4..];
+        const key_end = if (is_put) std.mem.indexOfScalar(u8, arguments, ' ') orelse {
+            return error.MissingValue;
+        } else arguments.len;
+
+        const key = arguments[0..key_end];
+        if (key.len == 0 or key.len > 255) {
+            return error.InvalidKey;
+        }
+
+        return .{
+            .operation = if (is_put) .put else .get,
+            .key = key,
+            .value = if (is_put) arguments[key_end + 1 ..] else "",
+        };
+    }
+
+    fn process_request(connection: *Connection, line: []const u8) void {
+        const parsed = parse_request(line) catch |err| {
+            send_response(connection, switch (err) {
+                error.InvalidOperation => "ERROR expected GET or PUT\n",
+                error.MissingValue => "ERROR expected key and value\n",
+                error.InvalidKey => "ERROR invalid key\n",
+            });
+            return;
+        };
+        @memcpy(connection.key[0..parsed.key.len], parsed.key);
+        connection.key[parsed.key.len] = 0;
+
+        const path = connection.key[0..parsed.key.len :0];
+        const server = connection.server;
+
+        if (parsed.operation == .put) {
+            connection.request = .{ .put = KvEngine.PutRequest.init(
+                path,
+                parsed.value,
+                server.ev_loop.completion(Connection, connection, put_done),
+            ) };
+            server.engine.put_key(&connection.request.put) catch
+                @panic("failed to start KV put");
+            return;
+        }
+
+        connection.request = .{ .get = KvEngine.GetRequest.init(
+            path,
+            &connection.value,
+            server.ev_loop.completion(Connection, connection, get_done),
+        ) };
+        server.engine.get_key(&connection.request.get) catch
+            @panic("failed to start KV get");
+    }
+
+    fn put_done(connection: *Connection, res: i32) void {
+        _ = res;
+        send_response(connection, "OK\n");
+    }
+
+    fn get_done(connection: *Connection, res: i32) void {
+        std.debug.assert(res >= 0);
+        const length = connection.request.get.bytes_read;
+        const response = std.fmt.bufPrint(&connection.response, "VALUE {d}\n{s}", .{
+            length, connection.value[0..length],
+        }) catch @panic("KV response buffer too small");
+        send_response(connection, response);
+    }
+
+    fn send_response(connection: *Connection, bytes: []const u8) void {
+        const ev_loop = connection.server.ev_loop;
+        connection.completion = ev_loop.completion(Connection, connection, send_callback);
+        ev_loop.send(&connection.completion, connection.fd, bytes, std.os.linux.MSG.NOSIGNAL) catch
+            @panic("failed to queue KV send");
+    }
+
+    fn send_callback(connection: *Connection, res: i32) void {
+        std.debug.assert(connection.completion.operation == .send);
         std.debug.assert(res > 0);
 
-        const input = self.completion.operation.send;
-        const ev_loop = self.completion.ev_loop;
+        const input = connection.completion.operation.send;
         const sent: usize = @intCast(res);
         std.debug.assert(sent <= input.buffer.len);
 
         if (sent < input.buffer.len) {
-            self.completion = ev_loop.completion(Connection, self, send_callback);
-            ev_loop.send(&self.completion, input.fd, input.buffer[sent..], std.os.linux.MSG.NOSIGNAL) catch
-                @panic("failed to queue send");
+            send_response(connection, input.buffer[sent..]);
             return;
         }
-
-        self.completion = ev_loop.completion(Connection, self, recv_callback);
-        ev_loop.recv(&self.completion, input.fd, &self.buffer, 0) catch
-            @panic("failed to queue recv");
+        close_connection(connection);
     }
 
-    fn close_callback(self: *Connection, res: i32) void {
-        std.debug.assert(self.completion.operation == .close);
+    fn close_connection(connection: *Connection) void {
+        const ev_loop = connection.server.ev_loop;
+        connection.completion = ev_loop.completion(Connection, connection, close_callback);
+        ev_loop.close(&connection.completion, connection.fd) catch
+            @panic("failed to queue KV client close");
+    }
+
+    fn close_callback(connection: *Connection, res: i32) void {
+        std.debug.assert(connection.completion.operation == .close);
         std.debug.assert(res == 0);
-        const allocator = self.allocator;
-        allocator.destroy(self);
+
+        const allocator = connection.server.allocator;
+        allocator.destroy(connection);
     }
 };
-
-fn kv_example() !void {
-    var ev_loop = try zig_ev.EvLoop.init(32);
-    defer ev_loop.deinit();
-    var program = KvEngine.init(&ev_loop);
-    var done_tracker = DoneTracker.init();
-
-    var put_request = KvEngine.PutRequest.init(
-        "test.txt",
-        "world",
-        ev_loop.completion(DoneTracker, &done_tracker, DoneTracker.mark_it_done),
-    );
-
-    try program.put_key(&put_request);
-
-    while (!done_tracker.is_done) try ev_loop.run();
-
-    done_tracker.is_done = false;
-    var buffer: [64]u8 = undefined;
-    var get_request = KvEngine.GetRequest.init(
-        "test.txt",
-        &buffer,
-        ev_loop.completion(DoneTracker, &done_tracker, DoneTracker.mark_it_done),
-    );
-
-    try program.get_key(&get_request);
-    while (!done_tracker.is_done) try ev_loop.run();
-
-    std.debug.print("\n[get result] {s}\n", .{get_request.buffer[0..get_request.bytes_read]});
-}
 
 const KvEngine = struct {
     ev_loop: *zig_ev.EvLoop,

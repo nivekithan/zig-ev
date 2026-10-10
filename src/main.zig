@@ -19,6 +19,73 @@ const DoneTracker = struct {
 pub fn main() !void {
     var ev_loop = try zig_ev.EvLoop.init(32);
     defer ev_loop.deinit();
+    var server = TcpServer.init(&ev_loop, 9090);
+
+    try server.start();
+    while (true) try ev_loop.run();
+}
+
+const TcpServer = struct {
+    ev_loop: *zig_ev.EvLoop,
+    address: std.os.linux.sockaddr.in,
+    fd: std.os.linux.fd_t = undefined,
+    completion: zig_ev.EvLoop.Completion = undefined,
+
+    fn init(ev_loop: *zig_ev.EvLoop, port: u16) TcpServer {
+        return .{
+            .ev_loop = ev_loop,
+            .address = .{
+                .port = std.mem.nativeToBig(u16, port),
+                .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
+            },
+        };
+    }
+
+    fn start(self: *TcpServer) !void {
+        self.completion = self.ev_loop.completion(TcpServer, self, socket_callback);
+        try self.ev_loop.socket(
+            &self.completion,
+            std.os.linux.AF.INET,
+            std.os.linux.SOCK.STREAM | std.os.linux.SOCK.CLOEXEC,
+            std.os.linux.IPPROTO.TCP,
+            0,
+        );
+    }
+
+    fn socket_callback(self: *TcpServer, res: i32) void {
+        std.debug.assert(self.completion.operation == .socket);
+        std.debug.assert(res >= 0);
+        self.fd = res;
+
+        self.completion = self.ev_loop.completion(TcpServer, self, bind_callback);
+        self.ev_loop.bind(
+            &self.completion,
+            self.fd,
+            @ptrCast(&self.address),
+            @sizeOf(std.os.linux.sockaddr.in),
+            0,
+        ) catch @panic("failed to queue bind");
+    }
+
+    fn bind_callback(self: *TcpServer, res: i32) void {
+        std.debug.assert(self.completion.operation == .bind);
+        std.debug.assert(res == 0);
+
+        self.completion = self.ev_loop.completion(TcpServer, self, listen_callback);
+        self.ev_loop.listen(&self.completion, self.fd, 511, 0) catch @panic("failed to queue listen");
+    }
+
+    fn listen_callback(self: *TcpServer, res: i32) void {
+        std.debug.assert(self.completion.operation == .listen);
+        std.debug.assert(res == 0);
+
+        std.debug.print("Listening on 127.0.0.1:{d}\n", .{std.mem.bigToNative(u16, self.address.port)});
+    }
+};
+
+fn kv_example() !void {
+    var ev_loop = try zig_ev.EvLoop.init(32);
+    defer ev_loop.deinit();
     var program = KvEngine.init(&ev_loop);
     var done_tracker = DoneTracker.init();
 

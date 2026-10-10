@@ -19,7 +19,7 @@ const DoneTracker = struct {
 pub fn main() !void {
     var ev_loop = try zig_ev.EvLoop.init(32);
     defer ev_loop.deinit();
-    var echo_server = EchoServer.init(&ev_loop);
+    var echo_server = EchoServer.init(&ev_loop, std.heap.page_allocator);
     var server = TcpServer.init(
         &ev_loop,
         9090,
@@ -107,31 +107,26 @@ const TcpServer = struct {
 
 const EchoServer = struct {
     ev_loop: *zig_ev.EvLoop,
-    connections: [2]Connection = @splat(.{}),
+    allocator: std.mem.Allocator,
 
     const Connection = struct {
-        in_use: bool = false,
+        allocator: std.mem.Allocator,
         completion: zig_ev.EvLoop.Completion = undefined,
         buffer: [4096]u8 = undefined,
     };
 
-    fn init(ev_loop: *zig_ev.EvLoop) EchoServer {
-        return .{ .ev_loop = ev_loop };
+    fn init(ev_loop: *zig_ev.EvLoop, allocator: std.mem.Allocator) EchoServer {
+        return .{ .ev_loop = ev_loop, .allocator = allocator };
     }
 
     fn on_connection(self: *EchoServer, res: i32) void {
         std.debug.assert(res >= 0);
-        for (&self.connections) |*connection| {
-            if (connection.in_use) continue;
-            connection.in_use = true;
-            connection.completion = self.ev_loop.completion(Connection, connection, recv_callback);
-            self.ev_loop.recv(&connection.completion, res, &connection.buffer, 0) catch
-                @panic("failed to queue recv");
-            return;
-        }
-
-        // No slot available. This socket has no I/O in flight.
-        _ = std.os.linux.close(res);
+        const connection = self.allocator.create(Connection) catch
+            @panic("failed to allocate connection");
+        connection.* = .{ .allocator = self.allocator };
+        connection.completion = self.ev_loop.completion(Connection, connection, recv_callback);
+        self.ev_loop.recv(&connection.completion, res, &connection.buffer, 0) catch
+            @panic("failed to queue recv");
     }
 
     fn recv_callback(self: *Connection, res: i32) void {
@@ -177,7 +172,8 @@ const EchoServer = struct {
     fn close_callback(self: *Connection, res: i32) void {
         std.debug.assert(self.completion.operation == .close);
         std.debug.assert(res == 0);
-        self.in_use = false;
+        const allocator = self.allocator;
+        allocator.destroy(self);
     }
 };
 

@@ -19,7 +19,12 @@ const DoneTracker = struct {
 pub fn main() !void {
     var ev_loop = try zig_ev.EvLoop.init(32);
     defer ev_loop.deinit();
-    var server = TcpServer.init(&ev_loop, 9090);
+    var echo_server = EchoServer.init(&ev_loop);
+    var server = TcpServer.init(
+        &ev_loop,
+        9090,
+        ev_loop.completion(EchoServer, &echo_server, EchoServer.on_connection),
+    );
 
     try server.start();
     while (true) try ev_loop.run();
@@ -30,11 +35,12 @@ const TcpServer = struct {
     address: std.os.linux.sockaddr.in,
     fd: std.os.linux.fd_t = undefined,
     completion: zig_ev.EvLoop.Completion = undefined,
-    buffer: [4096]u8 = undefined,
+    on_connection: zig_ev.EvLoop.Completion,
 
-    fn init(ev_loop: *zig_ev.EvLoop, port: u16) TcpServer {
+    fn init(ev_loop: *zig_ev.EvLoop, port: u16, on_connection: zig_ev.EvLoop.Completion) TcpServer {
         return .{
             .ev_loop = ev_loop,
+            .on_connection = on_connection,
             .address = .{
                 .port = std.mem.nativeToBig(u16, port),
                 .addr = @bitCast([4]u8{ 127, 0, 0, 1 }),
@@ -91,12 +97,28 @@ const TcpServer = struct {
         std.debug.assert(self.completion.operation == .accept);
         std.debug.assert(res >= 0);
 
-        self.completion = self.ev_loop.completion(TcpServer, self, recv_callback);
+        // Hand ownership of the client socket to the connection callback.
+        self.on_connection.callback(self.on_connection.context, res);
+    }
+};
+
+const EchoServer = struct {
+    ev_loop: *zig_ev.EvLoop,
+    completion: zig_ev.EvLoop.Completion = undefined,
+    buffer: [4096]u8 = undefined,
+
+    fn init(ev_loop: *zig_ev.EvLoop) EchoServer {
+        return .{ .ev_loop = ev_loop };
+    }
+
+    fn on_connection(self: *EchoServer, res: i32) void {
+        std.debug.assert(res >= 0);
+        self.completion = self.ev_loop.completion(EchoServer, self, recv_callback);
         self.ev_loop.recv(&self.completion, res, &self.buffer, 0) catch
             @panic("failed to queue recv");
     }
 
-    fn recv_callback(self: *TcpServer, res: i32) void {
+    fn recv_callback(self: *EchoServer, res: i32) void {
         std.debug.assert(self.completion.operation == .recv);
         std.debug.assert(res >= 0);
 
@@ -106,12 +128,12 @@ const TcpServer = struct {
             return;
         }
 
-        self.completion = self.ev_loop.completion(TcpServer, self, send_callback);
+        self.completion = self.ev_loop.completion(EchoServer, self, send_callback);
         self.ev_loop.send(&self.completion, input.fd, input.buffer[0..@intCast(res)], std.os.linux.MSG.NOSIGNAL) catch
             @panic("failed to queue send");
     }
 
-    fn send_callback(self: *TcpServer, res: i32) void {
+    fn send_callback(self: *EchoServer, res: i32) void {
         std.debug.assert(self.completion.operation == .send);
         std.debug.assert(res > 0);
 
@@ -120,13 +142,13 @@ const TcpServer = struct {
         std.debug.assert(sent <= input.buffer.len);
 
         if (sent < input.buffer.len) {
-            self.completion = self.ev_loop.completion(TcpServer, self, send_callback);
+            self.completion = self.ev_loop.completion(EchoServer, self, send_callback);
             self.ev_loop.send(&self.completion, input.fd, input.buffer[sent..], std.os.linux.MSG.NOSIGNAL) catch
                 @panic("failed to queue send");
             return;
         }
 
-        self.completion = self.ev_loop.completion(TcpServer, self, recv_callback);
+        self.completion = self.ev_loop.completion(EchoServer, self, recv_callback);
         self.ev_loop.recv(&self.completion, input.fd, &self.buffer, 0) catch
             @panic("failed to queue recv");
     }

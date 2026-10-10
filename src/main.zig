@@ -30,6 +30,7 @@ const TcpServer = struct {
     address: std.os.linux.sockaddr.in,
     fd: std.os.linux.fd_t = undefined,
     completion: zig_ev.EvLoop.Completion = undefined,
+    buffer: [4096]u8 = undefined,
 
     fn init(ev_loop: *zig_ev.EvLoop, port: u16) TcpServer {
         return .{
@@ -80,6 +81,54 @@ const TcpServer = struct {
         std.debug.assert(res == 0);
 
         std.debug.print("Listening on 127.0.0.1:{d}\n", .{std.mem.bigToNative(u16, self.address.port)});
+
+        self.completion = self.ev_loop.completion(TcpServer, self, accept_callback);
+        self.ev_loop.accept(&self.completion, self.fd, null, null, std.os.linux.SOCK.CLOEXEC) catch
+            @panic("failed to queue accept");
+    }
+
+    fn accept_callback(self: *TcpServer, res: i32) void {
+        std.debug.assert(self.completion.operation == .accept);
+        std.debug.assert(res >= 0);
+
+        self.completion = self.ev_loop.completion(TcpServer, self, recv_callback);
+        self.ev_loop.recv(&self.completion, res, &self.buffer, 0) catch
+            @panic("failed to queue recv");
+    }
+
+    fn recv_callback(self: *TcpServer, res: i32) void {
+        std.debug.assert(self.completion.operation == .recv);
+        std.debug.assert(res >= 0);
+
+        const input = self.completion.operation.recv;
+
+        if (res == 0) {
+            return;
+        }
+
+        self.completion = self.ev_loop.completion(TcpServer, self, send_callback);
+        self.ev_loop.send(&self.completion, input.fd, input.buffer[0..@intCast(res)], std.os.linux.MSG.NOSIGNAL) catch
+            @panic("failed to queue send");
+    }
+
+    fn send_callback(self: *TcpServer, res: i32) void {
+        std.debug.assert(self.completion.operation == .send);
+        std.debug.assert(res > 0);
+
+        const input = self.completion.operation.send;
+        const sent: usize = @intCast(res);
+        std.debug.assert(sent <= input.buffer.len);
+
+        if (sent < input.buffer.len) {
+            self.completion = self.ev_loop.completion(TcpServer, self, send_callback);
+            self.ev_loop.send(&self.completion, input.fd, input.buffer[sent..], std.os.linux.MSG.NOSIGNAL) catch
+                @panic("failed to queue send");
+            return;
+        }
+
+        self.completion = self.ev_loop.completion(TcpServer, self, recv_callback);
+        self.ev_loop.recv(&self.completion, input.fd, &self.buffer, 0) catch
+            @panic("failed to queue recv");
     }
 };
 

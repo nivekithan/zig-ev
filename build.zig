@@ -16,6 +16,7 @@ pub fn build(b: *std.Build) void {
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+    const zio = b.dependency("zio", .{ .target = target, .optimize = optimize });
     // It's also possible to define more custom flags to toggle optional features
     // of this build script using `b.option()`. All defined flags (including
     // target and optimize options) will be listed when running `zig build --help`
@@ -39,6 +40,7 @@ pub fn build(b: *std.Build) void {
         // Later on we'll use this module as the root module of a test executable
         // which requires us to specify a target.
         .target = target,
+        .imports = &.{.{ .name = "zio", .module = zio.module("zio") }},
     });
 
     // Here we define an executable. An executable needs to have a root module
@@ -88,6 +90,18 @@ pub fn build(b: *std.Build) void {
     // step). By default the install prefix is `zig-out/` but can be overridden
     // by passing `--prefix` or `-p`.
     b.installArtifact(exe);
+
+    const coroutine_demo = b.addExecutable(.{
+        .name = "coroutine",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/coroutine.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{.{ .name = "zig_ev", .module = mod }},
+        }),
+    });
+    const run_coroutine = b.addRunArtifact(coroutine_demo);
+    b.step("coroutine", "Run the two-coroutine yield demo").dependOn(&run_coroutine.step);
 
     // This creates a top level step. Top level steps have a name and can be
     // invoked by name when running `zig build` (e.g. `zig build run`).
